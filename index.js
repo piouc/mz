@@ -1,13 +1,15 @@
 const os = require('os')
 const fs = require('fs')
 const fsp = fs.promises
-const request = require('request-promise-native')
 const spawn = require('child_process').spawn
 const joinPath = require('path').join
-const uuidv4 = require('uuid/v4')
+const resolvePath = require('path').resolve
+const { v4: uuidv4 } = require('uuid')
 const sharp = require('sharp')
 const promisify = require('util').promisify
 const parseURL = require('url').parse
+const isURL = require('isurl')
+const fetch = require('node-fetch');
 
 const rimraf = promisify(require('rimraf'))
 
@@ -44,7 +46,7 @@ const discId = argv._[0]
 const discNumber = Number(argv['n']) || 1
 const multiDisc = argv['m']
 const device = argv['d']
-const imageURL = argv['c']
+const imageURI = argv['c']
 const outDir = argv['o'] || process.cwd()
 const targetDir = argv['t']
 
@@ -62,31 +64,26 @@ const targetDir = argv['t']
 	// Get or copy and processing cover image.
 	const imagePath = joinPath(tempDir, 'cover.jpg')
 	let image
-	if(parseURL(imageURL)){
-		image = await request({
-			url: imageURL,
-			encoding: null
-		})
-	} else {
-
+	if(imageURI){
+		if(/^https?:\/\//.test(imageURI)){
+			image = await fetch(imageURI).then(res => res.buffer())
+		} else {
+			image = await fsp.readFile(resolvePath(imageURI))
+		}
+		await sharp(image)
+			.resize({width: 512, options: {
+				withoutEnlargement: false
+			}})
+			.jpeg()
+			.toFile(imagePath)
 	}
-	await sharp(image)
-		.resize({width: 512, options: {
-			withoutEnlargement: false
-		}})
-		.jpeg()
-		.toFile(imagePath)
-
 
 	// Get cd information from music brainz
-	const data = await request({
-		url: `https://musicbrainz.org/ws/2/release/${discId}?inc=artist-credits+labels+discids+recordings&fmt=json`,
+	const data = await fetch(`https://musicbrainz.org/ws/2/release/${discId}?inc=artist-credits+labels+discids+recordings&fmt=json`,{
 		headers: {
 			'User-Agent': 'anonymous'
-		},
-		json: true
-	})
-
+		}
+	}).then(res => res.json())
 
 	// Rip disc if not set target-directory
 	if(!targetDir){
@@ -98,10 +95,11 @@ const targetDir = argv['t']
 			OUTPUTDIR='${ripDir}'
 		`)
 
-		const abcde = spawn('abcde', ['-c', confPath, '-d', device, '-n', '-N', '-x'], {cwd: tempDir})
+		console.log(await fsp.readdir(tempDir))
+
+		const abcde = spawn('abcde', ['-c', confPath, '-d', device, '-n', '-N', '-x'], {cwd: tempDir, stdio: ['pipe', process.stdout, process.stdout]})
 		await waitChildProcess(abcde)
 	}
-
 
 	// Convert and tagging files
 	const tracks = data.media.find(media => media.position === discNumber).tracks.map(track => ({
@@ -111,10 +109,14 @@ const targetDir = argv['t']
 		newFilename: `${multiDisc ? discNumber.toString().padStart(2, 0) + '-' : ''}${track.position.toString().padStart(2, 0)} ${track.title.replace(/[\/\\\?*:"\|<>]/, '')}.flac`
 	}))
 
-	const targetFiles = (await fsp.readdir(ripDir)).filter(filename => /\.(wav|aiff?|flac)$/.test(filename))
 
+	const albumDir = joinPath(outDir, joinArtistName(data['artist-credit']), data.title)
+	await fsp.mkdir(albumDir, {recursive: true})
+
+	const targetFiles = (await fsp.readdir(ripDir)).filter(filename => /\.(wav|aiff?|flac)$/.test(filename))
 	for(let filename of targetFiles){
-		const trackNumber = Number(filename.match(/^\d+/)[0])
+		console.log(filename)
+		const trackNumber = /^\d+-\d+\s/.test(filename) ? Number(filename.match(/^\d+-(\d+)/)[1]) : Number(filename.match(/^\d+/)[0])
 		const track = tracks.find(track => track.position === trackNumber)
 
 		if(!track) {
@@ -130,19 +132,12 @@ const targetDir = argv['t']
 			DISCNUMBER: discNumber,
 			TRACKNUMBER: track.position
 		}
-		const flac = spawn('flac', ['--disable-constant-subframes', '--disable-fixed-subframes', '--max-lpc-order=0', '-o', `${joinPath(outTempDir, track.newFilename)}`, `${joinPath(ripDir, filename)}`])
+		const flac = spawn('flac', ['--disable-constant-subframes', '--disable-fixed-subframes', '--max-lpc-order=0', '-o', `${joinPath(albumDir, track.newFilename)}`, `${joinPath(ripDir, filename)}`])
 		await waitChildProcess(flac)
 
-		const metaflac = spawn('metaflac', ['--remove-all-tags', ...Object.entries(tags).map(([name, value]) => `--set-tag=${name}=${value}`), `--import-picture-from`, `${joinPath(tempDir, 'cover.jpg')}`, `${joinPath(outTempDir, track.newFilename)}`])
+		const metaflac = spawn('metaflac', ['--remove-all-tags', ...Object.entries(tags).map(([name, value]) => `--set-tag=${name}=${value}`), `--import-picture-from`, `${joinPath(tempDir, 'cover.jpg')}`, `${joinPath(albumDir, track.newFilename)}`])
 		await waitChildProcess(metaflac)
 	}
-
-
-	// Move converted files to output directory
-	const artistDir = joinPath(outDir, joinArtistName(data['artist-credit']))
-	await fsp.mkdir(artistDir, {recursive: true})
-	await fsp.rename(outTempDir, joinPath(artistDir, data.title))
-
 
 	// Remove temorarily directory
 	await rimraf(tempDir)
