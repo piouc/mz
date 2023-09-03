@@ -5,13 +5,12 @@ import {join as joinPath} from 'path'
 import {resolve as resolvePath} from 'path'
 import { v4 as uuidv4 } from 'uuid'
 import sharp from 'sharp'
-import fetch from 'node-fetch'
 import yargs from 'yargs'
 import { hideBin } from 'yargs/helpers'
 import {  ArtistCredit, DiscIdLookupPayload, Release } from './musicbrainz-api-types'
 import { createHash } from 'crypto'
 import inquirer from 'inquirer'
-import { Response } from 'node-fetch'
+import axios from 'axios'
 
 const joinArtistName = (artists: ArtistCredit[]): string => {
 	if(artists.length < 2){
@@ -75,7 +74,7 @@ const getDiscId = async (device: string) => {
 }
 
 const getReleasesByDiscId = async (discId: string): Promise<string> => {
-	const data: DiscIdLookupPayload = (await fetch(`https://musicbrainz.org/ws/2/discid/${discId}?fmt=json`).then(res => res.json())) as any
+	const {data} = await axios<DiscIdLookupPayload>(`https://musicbrainz.org/ws/2/discid/${discId}?fmt=json`)
 	console.log(data, console.log(discId))
 	const res = await inquirer.prompt([
 		{
@@ -90,14 +89,6 @@ const getReleasesByDiscId = async (discId: string): Promise<string> => {
 	])
 	return res['releaseId']
 }
-
-const handleResponse = async (res: Response) => {
-	if(res.status >= 300) {
-		throw new Error('Bad response from server')
-	}
-	return res.arrayBuffer()
-}
-
 
 const argv = yargs(hideBin(process.argv))
 	.positional('releaseId', {
@@ -161,12 +152,12 @@ const imagePath = joinPath(tempDir, 'cover.jpg')
 let image: ArrayBuffer
 if(imageUri){
 	if(/^https?:\/\//.test(imageUri)){
-		image = await fetch(imageUri).then(handleResponse)
+		image = await axios(imageUri, {responseType: 'arraybuffer'})
 	} else {
 		image = await fsp.readFile(resolvePath(imageUri))
 	}
 } else {
-	image = await fetch(`https://coverartarchive.org/release/${releaseId}/front`).then(handleResponse)
+	image = await axios(`https://coverartarchive.org/release/${releaseId}/front`, {responseType: 'arraybuffer'})
 }
 
 await sharp(new Uint8Array(image))
@@ -178,11 +169,11 @@ await sharp(new Uint8Array(image))
 	.toFile(imagePath)
 
 // Get cd information from music brainz
-const data = await fetch(`https://musicbrainz.org/ws/2/release/${releaseId}?inc=artist-credits+labels+discids+recordings+media&fmt=json`,{
+const {data: release} = await axios<Release>(`https://musicbrainz.org/ws/2/release/${releaseId}?inc=artist-credits+labels+discids+recordings+media&fmt=json`,{
 	headers: {
 		'User-Agent': 'anonymous'
 	}
-}).then(res => res.json()) as Release
+})
 
 // Rip disc if not set target-directory
 if(!inputDir){
@@ -199,7 +190,7 @@ if(!inputDir){
 }
 
 // Convert and tagging files
-const tracks = data.media.find(media => media.position === discNumber)?.tracks.map(track => ({
+const tracks = release.media.find(media => media.position === discNumber)?.tracks.map(track => ({
 	position: track.position,
 	title: track.title,
 	artist: joinArtistName(track['artist-credit']),
@@ -207,7 +198,7 @@ const tracks = data.media.find(media => media.position === discNumber)?.tracks.m
 })) ?? []
 
 
-const albumDir = joinPath(outputDir, joinArtistName(data['artist-credit']), data.title)
+const albumDir = joinPath(outputDir, joinArtistName(release['artist-credit']), release.title)
 await fsp.mkdir(albumDir, {recursive: true})
 
 const targetFiles = (await fsp.readdir(ripDir)).filter(filename => /\.(wav|aiff?|flac)$/.test(filename))
@@ -221,8 +212,8 @@ for(let filename of targetFiles){
 	}
 
 	const tags = { 
-		ALBUM: data.title,
-		ALBUMARTIST: joinArtistName(data['artist-credit']),
+		ALBUM: release.title,
+		ALBUMARTIST: joinArtistName(release['artist-credit']),
 		ARTIST: track.artist,
 		TITLE: track.title,
 		DISCNUMBER: discNumber,
