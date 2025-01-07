@@ -21,8 +21,8 @@ const joinArtistName = (artists: ArtistCredit[]): string => {
 }
 
 const waitChildProcess = (childProcess: ChildProcess) => {
-	return new Promise<string>((resolve, reject) => {
-		const data: Buffer[] = []
+  return new Promise<string>((resolve, reject) => {
+		const data: Uint8Array[] = []
 		childProcess.stdout?.on('data', chunk => {
 			data.push(chunk)
 		})
@@ -31,7 +31,7 @@ const waitChildProcess = (childProcess: ChildProcess) => {
 		})
 		childProcess.on('exit', () => resolve(Buffer.concat(data).toString()))
 		childProcess.on('error', reject)
-	})
+  })
 }
 
 const toByteString = (num: number, length: number) => {
@@ -149,7 +149,7 @@ await fsp.mkdir(outTempDir, {recursive: true})
 console.log(releaseId)
 // Get or copy and processing cover image.
 const imagePath = joinPath(tempDir, 'cover.jpg')
-let image: ArrayBuffer
+let image: ArrayBuffer | Buffer
 if(imageUri){
 	if(/^https?:\/\//.test(imageUri)){
 		image = await axios(imageUri, {responseType: 'arraybuffer'})
